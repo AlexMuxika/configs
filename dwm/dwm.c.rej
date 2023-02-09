@@ -1,0 +1,10 @@
+--- dwm.c
++++ dwm.c
+@@ -207,6 +207,7 @@ static void seturgent(Client *c, int urg);
+ static void showhide(Client *c);
+ static void sigchld(int unused);
+ static void spawn(const Arg *arg);
++static void stairs(Monitor *m);
+ static void tag(const Arg *arg);
+ static void tagmon(const Arg *arg);
+ static void tile(Monitor *);
