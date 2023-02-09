@@ -1,0 +1,302 @@
+--- st.c
++++ st.c
+@@ -1084,51 +1151,116 @@ tcursor(int mode)
+ 	}
+ }
+ 
++void
++tresetcursor(void)
++{
++	term.c = (TCursor){ { .mode = ATTR_NULL, .fg = defaultfg, .bg = defaultbg },
++	                    .x = 0, .y = 0, .state = CURSOR_DEFAULT };
++}
++
+ void
+ treset(void)
+ {
+ 	uint i;
++  int x, y;
+ 
+-	term.c = (TCursor){{
+-		.mode = ATTR_NULL,
+-		.fg = defaultfg,
+-		.bg = defaultbg
+-	}, .x = 0, .y = 0, .state = CURSOR_DEFAULT};
++	tresetcursor();
+ 
+ 	memset(term.tabs, 0, term.col * sizeof(*term.tabs));
+ 	for (i = tabspaces; i < term.col; i += tabspaces)
+ 		term.tabs[i] = 1;
+ 	term.top = 0;
++	term.histf = 0;
++	term.scr = 0;
+ 	term.bot = term.row - 1;
+ 	term.mode = MODE_WRAP|MODE_UTF8;
+ 	memset(term.trantbl, CS_USA, sizeof(term.trantbl));
+ 	term.charset = 0;
+ 
++  selremove();
+ 	for (i = 0; i < 2; i++) {
+-		tmoveto(0, 0);
+-		tcursor(CURSOR_SAVE);
+-		tclearregion(0, 0, term.col-1, term.row-1);
++  	tcursor(CURSOR_SAVE); /* reset saved cursor */
++		for (y = 0; y < term.row; y++)
++			for (x = 0; x < term.col; x++)
++				tclearglyph(&term.line[y][x], 0);
+ 		tswapscreen();
+ 	}
++  tfulldirt();
+ }
+ 
+ void
+ tnew(int col, int row)
+ {
+-	term = (Term){ .c = { .attr = { .fg = defaultfg, .bg = defaultbg } } };
+-	tresize(col, row);
+-	treset();
++	int i, j;
++
++	for (i = 0; i < 2; i++) {
++		term.line = xmalloc(row * sizeof(Line));
++		for (j = 0; j < row; j++)
++			term.line[j] = xmalloc(col * sizeof(Glyph));
++		term.col = col, term.row = row;
++		tswapscreen();
++	}
++	term.dirty = xmalloc(row * sizeof(*term.dirty));
++	term.tabs = xmalloc(col * sizeof(*term.tabs));
++	for (i = 0; i < HISTSIZE; i++)
++		term.hist[i] = xmalloc(col * sizeof(Glyph));
++  treset();
+ }
+ 
++/* handle it with care */
+ void
+ tswapscreen(void)
+ {
+-	Line *tmp = term.line;
++	static Line *altline;
++	static int altcol, altrow;
++	Line *tmpline = term.line;
++	int tmpcol = term.col, tmprow = term.row;
+ 
+-	term.line = term.alt;
+-	term.alt = tmp;
++	term.line = altline;
++	term.col = altcol, term.row = altrow;
++	altline = tmpline;
++	altcol = tmpcol, altrow = tmprow;
+ 	term.mode ^= MODE_ALTSCREEN;
+-	tfulldirt();
++}
++
++void
++tloaddefscreen(int clear, int loadcursor)
++{
++	int col, row, alt = IS_SET(MODE_ALTSCREEN);
++
++	if (alt) {
++		if (clear)
++			tclearregion(0, 0, term.col-1, term.row-1, 1);
++		col = term.col, row = term.row;
++		tswapscreen();
++	}
++	if (loadcursor)
++		tcursor(CURSOR_LOAD);
++	if (alt)
++		tresizedef(col, row);
++}
++
++void
++tloadaltscreen(int clear, int savecursor)
++{
++	int col, row, def = !IS_SET(MODE_ALTSCREEN);
++
++	if (savecursor)
++		tcursor(CURSOR_SAVE);
++	if (def) {
++		col = term.col, row = term.row;
++		tswapscreen();
++		term.scr = 0;
++		tresizealt(col, row);
++	}
++	if (clear)
++		tclearregion(0, 0, term.col-1, term.row-1, 1);
++}
++
++int
++tisaltscreen(void)
++{
++	return IS_SET(MODE_ALTSCREEN);
+ }
+ 
+ void
+@@ -1159,92 +1296,118 @@ kscrollup(const Arg* a)
+ {
+ 	int n = a->i;
+ 
++	if (!term.histf || IS_SET(MODE_ALTSCREEN))
++		return;
++
+ 	if (n < 0)
+-		n = term.row + n;
++		n = MAX(term.row / -n, 1);
+ 
+-	if (term.scr <= HISTSIZE-n) {
++	if (term.scr + n <= term.histf) {
+ 		term.scr += n;
+-		selscroll(0, n);
+-		tfulldirt();
++	} else {
++		n = term.histf - term.scr;
++		term.scr = term.histf;
+ 	}
++
++	if (sel.ob.x != -1 && !sel.alt)
++		selmove(n); /* negate change in term.scr */
++	tfulldirt();
+ }
+ 
+ void
+-tscrolldown(int orig, int n, int copyhist)
++tscrolldown(int top, int n)
+ {
+-	int i;
++	int i, bot = term.bot;
+ 	Line temp;
+ 
+-	LIMIT(n, 0, term.bot-orig+1);
+-	if (copyhist) {
+-		term.histi = (term.histi - 1 + HISTSIZE) % HISTSIZE;
+-		temp = term.hist[term.histi];
+-		term.hist[term.histi] = term.line[term.bot];
+-		term.line[term.bot] = temp;
+-	}
+-
++	if (n <= 0)
++		return;
++	n = MIN(n, bot-top+1);
+ 
+-	tsetdirt(orig, term.bot-n);
+-	tclearregion(0, term.bot-n+1, term.col-1, term.bot);
++	tsetdirt(top, bot-n);
++	tclearregion(0, bot-n+1, term.col-1, bot, 1);
+ 
+-	for (i = term.bot; i >= orig+n; i--) {
++	for (i = bot; i >= top+n; i--) {
+ 		temp = term.line[i];
+ 		term.line[i] = term.line[i-n];
+ 		term.line[i-n] = temp;
+ 	}
+ 
+-	if (term.scr == 0)
+-		selscroll(orig, n);
++	if (sel.ob.x != -1 && sel.alt == IS_SET(MODE_ALTSCREEN))
++		selscroll(top, bot, n);
+ }
+ 
+ void
+-tscrollup(int orig, int n, int copyhist)
++tscrollup(int top, int bot, int n, int mode)
+ {
+-	int i;
++	int i, j, s;
++	int alt = IS_SET(MODE_ALTSCREEN);
++	int savehist = !alt && top == 0 && mode != SCROLL_NOSAVEHIST;
+ 	Line temp;
+ 
+-	LIMIT(n, 0, term.bot-orig+1);
+-
+-	if (copyhist) {
+-		term.histi = (term.histi + 1) % HISTSIZE;
+-		temp = term.hist[term.histi];
+-		term.hist[term.histi] = term.line[orig];
+-		term.line[orig] = temp;
++	if (n <= 0)
++		return;
++	n = MIN(n, bot-top+1);
++
++	if (savehist) {
++		for (i = 0; i < n; i++) {
++			term.histi = (term.histi + 1) % HISTSIZE;
++			temp = term.hist[term.histi];
++			for (j = 0; j < term.col; j++)
++				tclearglyph(&temp[j], 1);
++			term.hist[term.histi] = term.line[i];
++			term.line[i] = temp;
++		}
++		term.histf = MIN(term.histf + n, HISTSIZE);
++		s = n;
++		if (term.scr) {
++			j = term.scr;
++			term.scr = MIN(j + n, HISTSIZE);
++			s = j + n - term.scr;
++		}
++		if (mode != SCROLL_RESIZE)
++			tfulldirt();
++	} else {
++		tclearregion(0, top, term.col-1, top+n-1, 1);
++		tsetdirt(top+n, bot);
+ 	}
+ 
+-	if (term.scr > 0 && term.scr < HISTSIZE)
+-		term.scr = MIN(term.scr + n, HISTSIZE-1);
+-
+-	tclearregion(0, orig, term.col-1, orig+n-1);
+-	tsetdirt(orig+n, term.bot);
+-
+-	for (i = orig; i <= term.bot-n; i++) {
++	for (i = top; i <= bot-n; i++) {
+ 		temp = term.line[i];
+ 		term.line[i] = term.line[i+n];
+ 		term.line[i+n] = temp;
+ 	}
+ 
+-	if (term.scr == 0)
+-		selscroll(orig, -n);
++	if (sel.ob.x != -1 && sel.alt == alt) {
++		if (!savehist) {
++			selscroll(top, bot, -n);
++		} else if (s > 0) {
++			selmove(-s);
++			if (-term.scr + sel.nb.y < -term.histf)
++				selremove();
++		}
++	}
+ }
+ 
+ void
+-selscroll(int orig, int n)
++selmove(int n)
+ {
+-	if (sel.ob.x == -1)
+-		return;
++	sel.ob.y += n, sel.nb.y += n;
++	sel.oe.y += n, sel.ne.y += n;
++}
++
++void
++selscroll(int top, int bot, int n)
++{
++	/* turn absolute coordinates into relative */
++	top += term.scr, bot += term.scr;
+ 
+-	if (BETWEEN(sel.nb.y, orig, term.bot) != BETWEEN(sel.ne.y, orig, term.bot)) {
++	if (BETWEEN(sel.nb.y, top, bot) != BETWEEN(sel.ne.y, top, bot)) {
+ 		selclear();
+-	} else if (BETWEEN(sel.nb.y, orig, term.bot)) {
+-		sel.ob.y += n;
+-		sel.oe.y += n;
+-		if (sel.ob.y < term.top || sel.ob.y > term.bot ||
+-		    sel.oe.y < term.top || sel.oe.y > term.bot) {
++	} else if (BETWEEN(sel.nb.y, top, bot)) {
++		selmove(n);
++		if (sel.nb.y < top || sel.ne.y > bot)
+ 			selclear();
+-		} else {
+-			selnormalize();
+-		}
+ 	}
+ }
+ 
