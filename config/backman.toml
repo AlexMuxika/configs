@@ -1,0 +1,5 @@
+mode = "random"
+directories = [ "/home/muxika/Pictures/Wallpaper/nord-backgrounds/",]
+fix_bg = "Nextcloud/Pictures/Wallpaper/"
+wal_opts = [ "",]
+prev_bg = "/home/muxika/Pictures/Wallpaper/nord-backgrounds/nord-wallpapers/wallpapers/ign_unsplash3.png"
